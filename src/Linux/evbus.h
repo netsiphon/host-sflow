@@ -24,6 +24,7 @@ extern "C" {
 #include <pthread.h>
 #include <dlfcn.h>
 #include <limits.h> // for PIPE_BUF
+#include <signal.h> // for sigemptyset()
 
 #include "util.h"
 
@@ -53,6 +54,12 @@ extern "C" {
 
   struct _EVSocket; // fwd decl
 
+  typedef struct _EVLogMsg {
+    char *msg;
+    uint32_t logTime;
+    uint32_t count;
+  } EVLogMsg;
+
   typedef struct _EVBus {
     EVRoot *root;
     char *name;
@@ -63,13 +70,14 @@ extern "C" {
     UTArray *sockets_run;
     UTArray *sockets_del;
     int select_mS;
-#define EVBUS_SELECT_MS_TICK 991
-#define EVBUS_SELECT_MS_DECI 91
+#define EVBUS_SELECT_MS_TICK 599
+#define EVBUS_SELECT_MS_DECI 59
     struct timespec now;
     struct timespec now_tick;
     struct timespec now_deci;
     pthread_t *thread;
     int childCount;
+    UTHash *msgs;
     bool socketsChanged:1;
     bool running:1;
     bool stop:1;
@@ -161,12 +169,15 @@ extern "C" {
 #define EV_BUS_STACKSIZE 2000000
 
   int EVTimeDiff_nS(struct timespec *t1, struct timespec *t2);
+  int EVTimeDiff_mS(struct timespec *t1, struct timespec *t2);
   void EVBusRunThread(EVBus *bus, size_t stacksize);
   void EVBusRun(EVBus *bus);
   void EVBusStop(EVBus *bus);
   EVBus *EVCurrentBus(void);
+  void EVCurrentBusSet(EVBus *bus);
   void EVRun(EVBus *mainBus);
   void EVStop(EVMod *mod);
+  void EVLog(uint32_t rl_secs, int syslogType, char *fmt, ...);
 
 #if defined(__cplusplus)
 } /* extern "C" */

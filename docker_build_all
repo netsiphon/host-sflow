@@ -1,0 +1,6 @@
+#!/bin/bash
+cd `dirname $0`
+for platform in `ls docker_build`; do
+   echo "============= docker_build_on $platform ================"
+   ./docker_build_on $platform;
+done

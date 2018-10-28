@@ -128,15 +128,21 @@ extern "C" {
     -----------------___________________________------------------
   */
 
-  void myLog(int syslogType, char *fmt, ...)
+  void myLogv(int syslogType, char *fmt, va_list args)
   {
-    va_list args;
-    va_start(args, fmt);
     if(debugLevel) {
       vfprintf(stderr, fmt, args);
       fprintf(stderr, "\n");
     }
-    else vsyslog(syslogType, fmt, args);
+    else
+      vsyslog(syslogType, fmt, args);
+  }
+
+  void myLog(int syslogType, char *fmt, ...)
+  {
+    va_list args;
+    va_start(args, fmt);
+    myLogv(syslogType, fmt, args);
   }
 
   void setDebug(int level) {
@@ -434,6 +440,10 @@ extern "C" {
 
   uint32_t my_strhash(const char *str) {
     return hash_fnv1a(str, my_strlen(str));
+  }
+
+  uint32_t my_binhash(const char *bytes, const uint32_t len) {
+    return hash_fnv1a(bytes, len);
   }
 
   /*_________________---------------------------__________________
@@ -795,9 +805,11 @@ extern "C" {
   }
 
   void UTArrayFree(UTArray *ar) {
-    UTArrayReset(ar);
+    if(ar->sync) {
+      UTArrayReset(ar);
+      my_free(ar->sync);
+    }
     if(ar->objs) my_free(ar->objs);
-    if(ar->sync) my_free(ar->sync);
     my_free(ar);
   }
 
@@ -986,6 +998,12 @@ extern "C" {
     return hash_fnv1a(uuid, 16);
   }
 
+  bool isZeroUUID(char *uuid) {
+    for(int ii = 0; ii < 16; ii++)
+      if(uuid[ii]) return NO;
+    return YES;
+  }
+
   /*_________________---------------------------__________________
     _________________     printSpeed            __________________
     -----------------___________________________------------------
@@ -1076,14 +1094,10 @@ extern "C" {
       while(close(pfd[1]) == -1 && errno == EINTR); // clean up
       // By merging stdout and stderr we make it easier to read the data back
       // but it does mean the caller has to be able to tell the difference between
-      // the expected lines of stdout and an error message.
-      // (One option is to collect all the output and then check
-      // the exit status before processing it,  but if this gets awkward it may
-      // be better to come back and do this more carefully.)
-      // exec program
-      char *env[] = { NULL };
-      if(execve(cmd[0], cmd, env) == -1) {
-	myLog(LOG_ERR, "execve() failed : errno=%d (%s)", errno, strerror(errno));
+      // the expected lines of stdout and an error message. See EVBusExec() for a
+      // more thorough treatment.
+      if(execv(cmd[0], cmd) == -1) {
+	myLog(LOG_ERR, "execv(%s,...) failed : errno=%d (%s)", cmd[0], errno, strerror(errno));
 	exit(EXIT_FAILURE);
       }
     }
@@ -1285,6 +1299,8 @@ extern "C" {
 			     len);
   }
 
+  // TODO: replace "int" with "bool" where appropriate
+
   int SFLAddress_equal(SFLAddress *addr1, SFLAddress *addr2) {
     if(addr1 == addr2) return YES;
     if(addr1 ==NULL ||addr2 == NULL) return NO;
@@ -1310,6 +1326,19 @@ extern "C" {
       // for IPv4, it's 127.0.0.0/8
       char *a = (char *)&(addr->address.ip_v4.addr);
       return a[0] == 127;
+    }
+  }
+
+  int SFLAddress_isZero(SFLAddress *addr) {
+    if(addr->type == SFLADDRESSTYPE_IP_V6) {
+      uint32_t *x = (uint32_t *)addr->address.ip_v6.addr;
+      return (x[0] == 0 &&
+	      x[1] == 0 &&
+	      x[2] == 0 &&
+	      x[3] == 0);
+    }
+    else {
+      return (addr->address.ip_v4.addr == 0);
     }
   }
 

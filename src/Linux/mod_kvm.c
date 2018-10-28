@@ -180,6 +180,7 @@ extern "C" {
 	SEMLOCK_DO(sp->sync_agent) {
 	  sfl_poller_writeCountersSample(poller, cs);
 	  sp->counterSampleQueued = YES;
+	  sp->telemetry[HSP_TELEMETRY_COUNTER_SAMPLES]++;
 	}
 
 	virDomainFree(domainPtr);
@@ -431,12 +432,32 @@ extern "C" {
   }
 
   /*_________________---------------------------__________________
+    _________________     getConnection         __________________
+    -----------------___________________________------------------
+  */
+
+  static virConnectPtr getConnection(EVMod *mod) {
+    HSP_mod_KVM *mdata = (HSP_mod_KVM *)mod->data;
+    if(mdata->virConn == NULL) {
+      mdata->virConn = virConnectOpenReadOnly(NULL);
+      if(mdata->virConn == NULL) {
+	myLog(LOG_ERR, "virConnectOpenReadOnly() failed\n");
+      }
+    }
+    return mdata->virConn;
+  }
+
+  /*_________________---------------------------__________________
     _________________    configVMs              __________________
     -----------------___________________________------------------
   */
 
   static void configVMs(EVMod *mod) {
     HSP_mod_KVM *mdata = (HSP_mod_KVM *)mod->data;
+
+    if(getConnection(mod) == NULL)
+      return;
+
     // mark and sweep
     // 1. mark all the current virtual pollers
     HSPVMState_KVM *state;
@@ -482,6 +503,10 @@ extern "C" {
     SFL_COUNTERS_SAMPLE_TYPE *cs = *(SFL_COUNTERS_SAMPLE_TYPE **)data;
     HSP_mod_KVM *mdata = (HSP_mod_KVM *)mod->data;
     HSP *sp = (HSP *)EVROOTDATA(mod);
+
+    if(!hasVNodeRole(mod, HSP_VNODE_PRIORITY_KVM))
+      return;
+
     memset(&mdata->vnodeElem, 0, sizeof(mdata->vnodeElem));
     mdata->vnodeElem.tag = SFLCOUNTERS_HOST_VRT_NODE;
     mdata->vnodeElem.counterBlock.host_vrt_node.mhz = sp->cpu_mhz;
@@ -510,15 +535,13 @@ extern "C" {
     HSP_mod_KVM *mdata = (HSP_mod_KVM *)mod->data;
     HSP *sp = (HSP *)EVROOTDATA(mod);
 
+    requestVNodeRole(mod, HSP_VNODE_PRIORITY_KVM);
+    retainRootRequest(mod, "needed by virConnectOpenReadOnly() to create user runtime directory");
+      
     // open the libvirt connection - failure is not an option
     int virErr = virInitialize();
     if(virErr != 0) {
       myLog(LOG_ERR, "virInitialize() failed: %d\n", virErr);
-      exit(EXIT_FAILURE);
-    }
-    mdata->virConn = virConnectOpenReadOnly(NULL);
-    if(mdata->virConn == NULL) {
-      myLog(LOG_ERR, "virConnectOpenReadOnly() failed\n");
       exit(EXIT_FAILURE);
     }
 

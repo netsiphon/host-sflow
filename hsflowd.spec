@@ -1,7 +1,7 @@
 Summary: host sFlow daemon
 Name: hsflowd
-Version: 2.0.5
-Release: 4
+Version: 2.0.18
+Release: 1
 License: http://sflow.net/license.html
 Group: Applications/Internet
 URL: http://sflow.net
@@ -13,7 +13,7 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}
 # that are not captured here, but they do not have to be enabled (dynamic loaded) for
 # the program to run.
 AutoReqProv: no
-Requires: ld-linux-x86-64.so.2()(64bit),libc.so.6(GLIBC_2.3.4)(64bit),libdl.so.2()(64bit),libm.so.6()(64bit),libpthread.so.0()(64bit),libresolv.so.2()(64bit)
+Requires: glibc >= 2.3.4
 
 # for rpm backwards compatibility
 %define _binary_payload w9.gzdio
@@ -44,12 +44,15 @@ make clean
 %defattr(-,root,root,-)
 /usr/sbin/hsflowd
 %config(noreplace) /etc/hsflowd.conf
+%config(noreplace) /etc/dbus-1/system.d/net.sflow.hsflowd.conf
 /etc/init.d/hsflowd
 /lib/systemd/system/hsflowd.service
 %doc README LICENSE INSTALL.Linux
 /etc/hsflowd/modules/
 
 %changelog
+* Mon Dec 12 2016 nhm <neil.mckee@inmon.com>
+- add dbus config file
 * Wed Jul 20 2016 nhm <neil.mckee@inmon.com>
 - add systemd service file
 - remove sflowovsd (now an hsflowd module)
@@ -64,4 +67,3 @@ make clean
 - added post and preun,  and require chkconfig
 * Thu Feb 11 2010 nhm <nhm@chow.sf.inmon.com> 
 - Initial build.
-

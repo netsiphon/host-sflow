@@ -8,31 +8,33 @@ extern "C" {
 
 #include "hsflowd.h"
 #include "arpa/nameser.h"
-#include "arpa/nameser_compat.h"
 #include "resolv.h"
 
-extern int debug;
+#define HSP_MIN_DNAME 4  /* what is the shortest FQDN you can have? */
+#define HSP_MIN_TXT 4  /* what is the shortest meaingful TXT record here? */
 
-#define HSF_MIN_DNAME 4  /* what is the shortest FQDN you can have? */
-#define HSF_MIN_TXT 4  /* what is the shortest meaingful TXT record here? */
-    
   /*________________---------------------------__________________
     ________________       dnsSD_Request       __________________
     ----------------___________________________------------------
   */
 
   static
- int dnsSD_Request(HSP *sp, char *dname, uint16_t rtype, HSPDnsCB callback)
+  int dnsSD_Request(HSP *sp, char *dname, uint16_t rtype, HSPDnsCB callback, HSPSFlowSettings *settings)
   {
     u_char buf[PACKETSZ];
-    if(debug) myLog(LOG_INFO,"=== res_search(%s, C_IN, %u) ===", dname, rtype);
+
+    // We could have a config option to set the DNS servers that we will ask. If so
+    // they should be written into this array of sockaddrs...
+    // myDebug(1,"_res_nsaddr=%p", &_res.nsaddr);
+
+    myDebug(1,"=== res_search(%s, C_IN, %u) ===", dname, rtype);
     int anslen = res_search(dname, C_IN, rtype, buf, PACKETSZ);
     if(anslen == -1) {
       if(errno == 0 && (h_errno == HOST_NOT_FOUND || h_errno == NO_DATA)) {
 	// although res_search returned -1, the request did actually get an answer,
 	// it's just that there was no SRV record configured,  or the response was
 	// not authoritative. Interpret this the same way as answer_count==0.
-	if(debug) myLog(LOG_INFO,"res_search(%s, C_IN, %u) came up blank (h_errno=%d)", dname, rtype, h_errno);
+	myDebug(1,"res_search(%s, C_IN, %u) came up blank (h_errno=%d)", dname, rtype, h_errno);
 	return 0;
       }
       else {
@@ -55,7 +57,7 @@ extern int debug;
       myLog(LOG_INFO,"res_search(%s) returned no answer", dname);
       return 0;
     }
-    if(debug) myLog(LOG_INFO, "dnsSD: answer_count = %d", answer_count);
+    myDebug(1, "dnsSD: answer_count = %d", answer_count);
 
     u_char *p = buf + sizeof(HEADER);
     u_char *endp = buf + anslen;
@@ -66,14 +68,14 @@ extern int debug;
       myLog(LOG_ERR,"dn_skipname() <query> failed");
       return -1;
     }
-    if(debug) myLog(LOG_INFO, "dnsSD: (compressed) query_name_len = %d", query_name_len);
+    myDebug(1, "dnsSD: (compressed) query_name_len = %d", query_name_len);
     p += (query_name_len);
     p += QFIXEDSZ;
 
     // collect array of results
     for(int entry = 0; entry < answer_count; entry++) {
 
-      if(debug) myLog(LOG_INFO, "dnsSD: entry %d, bytes_left=%d", entry, (endp - p));
+      myDebug(1, "dnsSD: entry %d, bytes_left=%d", entry, (endp - p));
 
       // consume name (again)
       query_name_len = dn_skipname(p, endp);
@@ -106,7 +108,7 @@ extern int debug;
 	myLog(LOG_ERR,"expected t=%d,c=%d, got t=%d,c=%d", rtype, C_IN, res_typ, res_cls);
 	return -1;
       }
-      
+
       switch(rtype) {
       case T_SRV:
 	{
@@ -117,32 +119,32 @@ extern int debug;
 	  uint32_t res_prt = (x[4] << 8)  | x[5];
 	  x += 6;
 	  res_payload -= 6;
-	  
+
 	  // still got room for an FQDN?
-	  if((endp - x) < HSF_MIN_DNAME) {
+	  if((endp - x) < HSP_MIN_DNAME) {
 	    myLog(LOG_ERR,"no room for target name -- only %d bytes left", (endp - x));
 	    return -1;
 	  }
-	  
+
 	  char fqdn[MAXDNAME];
 	  int ans_len = dn_expand(buf, endp, x, fqdn, MAXDNAME);
 	  if(ans_len == -1) {
 	    myLog(LOG_ERR,"dn_expand() failed");
 	    return -1;
 	  }
-	  
+
 	  // cross-check
 	  if(ans_len != res_payload) {
 	    myLog(LOG_ERR,"target name len cross-check failed");
 	    return -1;
 	  }
-	  
-	  if(ans_len < HSF_MIN_DNAME) {
+
+	  if(ans_len < HSP_MIN_DNAME) {
 	    // just ignore this one -- e.g. might just be "."
 	  }
 	  else {
 	    // fqdn[ans_len] = '\0';
-	    if(debug) myLog(LOG_INFO, "answer %d is <%s>:<%u> (wgt=%d; pri=%d; ttl=%d; ans_len=%d; res_len=%d)",
+	    myDebug(1, "answer %d is <%s>:<%u> (wgt=%d; pri=%d; ttl=%d; ans_len=%d; res_len=%d)",
 			    entry,
 			    fqdn,
 			    res_prt,
@@ -155,7 +157,7 @@ extern int debug;
 	      char fqdn_port[PACKETSZ];
 	      sprintf(fqdn_port, "%s/%u", fqdn, res_prt);
 	      // use key == NULL to indicate that the value is host:port
-	      (*callback)(sp, rtype, res_ttl, NULL, 0, (u_char *)fqdn_port, strlen(fqdn_port));
+	      (*callback)(sp, rtype, res_ttl, NULL, 0, (u_char *)fqdn_port, strlen(fqdn_port), settings);
 	    }
 	  }
 	}
@@ -166,18 +168,18 @@ extern int debug;
 	  // [TXT:res_len]
 
 	  // still got room for a text record?
-	  if((endp - x) < HSF_MIN_TXT) {
+	  if((endp - x) < HSP_MIN_TXT) {
 	    myLog(LOG_ERR,"no room for text record -- only %d bytes left", (endp - x));
 	    return -1;
 	  }
 
-	  if(debug) {
+	  if(getDebug()) {
 	    printf("dsnSD TXT Record: ");
 	    for(int i = 0; i < res_len; i++) {
 	      int ch = x[i];
 	      if(isalnum(ch)) printf("%c", ch);
 	      else printf("{%02x}", ch);
-	    } 
+	    }
 	    printf("\n");
 	  }
 
@@ -193,7 +195,7 @@ extern int debug;
 	      myLog(LOG_ERR, "dsnSD TXT record not in var=val format: %s", x);
 	    }
 	    else {
-	      if(callback) (*callback)(sp, rtype, res_ttl, x, klen, (x+klen+1), (pairlen - klen - 1));
+	      if(callback) (*callback)(sp, rtype, res_ttl, x, klen, (x+klen+1), (pairlen - klen - 1), settings);
 	    }
 	    x += pairlen;
 	  }
@@ -208,21 +210,23 @@ extern int debug;
     }
     return answer_count;
   }
-    
+
   /*________________---------------------------__________________
     ________________      dnsSD                __________________
     ----------------___________________________------------------
   */
 
-  int dnsSD(HSP *sp, HSPDnsCB callback)
+  int dnsSD(HSP *sp, HSPDnsCB callback, HSPSFlowSettings *settings)
   {
-    int num_servers = dnsSD_Request(sp, SFLOW_DNS_SD, T_SRV, callback);
-    dnsSD_Request(sp, SFLOW_DNS_SD, T_TXT, callback);
-    // it's ok even if just the SRV request succeeded
+    char request[HSP_MAX_DNS_LEN];
+    char *domain_override = sp->DNSSD_domain ? sp->DNSSD_domain : "";
+    snprintf(request, HSP_MAX_DNS_LEN, "%s%s", SFLOW_DNS_SD, domain_override);
+    int num_servers = dnsSD_Request(sp, request, T_SRV, callback, settings);
+    dnsSD_Request(sp, request, T_TXT, callback, settings);
+    // it's ok even if only the SRV request succeeded
     return num_servers; //  -1 on error
   }
 
 #if defined(__cplusplus)
 } /* extern "C" */
 #endif
-

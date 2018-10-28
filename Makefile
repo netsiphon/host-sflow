@@ -15,41 +15,49 @@ $(PROG):
 	cd src/json; $(MAKE)
 	PLATFORM=`uname`; \
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
-        cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL
+	MYREL=`./getRelease`; \
+	cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL
 
 clean:
 	cd src/sflow; $(MAKE) clean
 	cd src/json; $(MAKE) clean
 	PLATFORM=`uname`; \
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
-        cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL clean
+	MYREL=`./getRelease`; \
+	cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL clean
 
 install:
 	PLATFORM=`uname`; \
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
-        cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL install
+	MYREL=`./getRelease`; \
+	cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL install
 
 schedule:
 	PLATFORM=`uname`; \
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
-        cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL schedule
+	MYREL=`./getRelease`; \
+	cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL schedule
 
-dist:
+dist: clean
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
-	MYTARBALL=$(PROG)-$$MYVER-$$MYREL.tar.gz; \
-	git archive HEAD --prefix=$(PROG)-$$MYVER-$$MYREL/ | gzip >$$MYTARBALL;
+	MYREL=`./getRelease`; \
+	MYTARDIR=$(PROG)-$$MYVER-$$MYREL; \
+	MYTARBALL=$$MYTARDIR.tar.gz; \
+	MYTMP=.tmpdist; \
+	rm -rf $$MYTMP; \
+	MYTMPDIR=$$MYTMP/$$MYTARDIR; \
+	mkdir -p $$MYTMPDIR; \
+	rsync -a --exclude=".*" --exclude="*~" --exclude="*.o" --exclude="*.so" --exclude="*.a" --exclude="$(PROG)[-_][0-9]*" . $$MYTMPDIR; \
+	cd $$MYTMP; \
+	tar czf ../$$MYTARBALL $$MYTARDIR; \
+	cd ..; \
+	rm -rf $$MYTMP
 
-rpm:
+rpm: dist
 	MYARCH=`uname -m`; \
 	MYVER=`./getVersion`; \
 	MYREL=`./getRelease`; \
 	MYTARBALL=$(PROG)-$$MYVER-$$MYREL.tar.gz; \
-	git archive HEAD --prefix=$(PROG)-$$MYVER-$$MYREL/ | gzip >$$MYTARBALL; \
 	mkdir -p $(MY_RPM_TOP)/BUILD; \
 	mkdir -p $(MY_RPM_TOP)/SRPMS; \
 	mkdir -p $(MY_RPM_TOP)/RPMS; \
@@ -87,13 +95,13 @@ xenrpm:
 
 aixrpm:
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
+	MYREL=`./getRelease`; \
 	SOURCES=/opt/freeware/src/packages/SOURCES; \
 	MYSRCDIR=$$SOURCES/$(PROG)-$$MYVER; \
 	rm -rf $$MYSRCDIR; \
 	cp -r . $$MYSRCDIR; \
 	tar cf $$MYSRCDIR.tar -C $$SOURCES $(PROG)-$$MYVER; \
-        gzip -f $$MYSRCDIR.tar; \
+	gzip -f $$MYSRCDIR.tar; \
 	rpm -ba $(PROG).spec.aix
 
 pkg:
@@ -114,12 +122,14 @@ pkg:
 deb: $(PROG)
 	MYARCH=`uname -m|sed 's/x86_64/amd64/'`; \
 	MYVER=`./getVersion`; \
-        MYREL=`./getRelease`; \
+	MYREL=`./getRelease`; \
+	PLATFORM=`uname`; \
 	mkdir -p debian/DEBIAN; \
-        mkdir -p debian/usr/sbin; \
+	mkdir -p debian/usr/sbin; \
 	mkdir -p debian/etc/init.d; \
 	mkdir -p debian/etc/hsflowd/modules; \
 	mkdir -p debian/lib/systemd/system; \
+	mkdir -p debian/etc/dbus-1/system.d; \
 	install DEBIAN_build/control debian/DEBIAN; \
 	sed -i -e s/_PACKAGE_/$(PROG)/g debian/DEBIAN/control; \
 	sed -i -e s/_VERSION_/$${MYVER}-$${MYREL}/g debian/DEBIAN/control; \
@@ -128,15 +138,12 @@ deb: $(PROG)
 	install -m 555 DEBIAN_build/preinst debian/DEBIAN; \
 	install -m 555 DEBIAN_build/postinst debian/DEBIAN; \
 	install -m 555 DEBIAN_build/prerm debian/DEBIAN; \
-	install -m 700 src/Linux/hsflowd debian/usr/sbin; \
-	install -m 755 src/Linux/mod_*.so debian/etc/hsflowd/modules; \
-	install -m 755 src/Linux/scripts/hsflowd.deb debian/etc/init.d/hsflowd; \
-	install -m 644 src/Linux/scripts/hsflowd.conf debian/etc; \
-	install -m 644 src/Linux/scripts/hsflowd.service debian/lib/systemd/system; \
-        cd debian; \
+	cd src/$$PLATFORM; $(MAKE) VERSION=$$MYVER RELEASE=$$MYREL INSTROOT="../../debian" install; cd ../..; \
+        pwd; \
+	cd debian; \
 	find . -type d | xargs chmod 755; \
-        md5sum `find usr etc -type f` > DEBIAN/md5sums; \
-        cd ..; \
+	md5sum `find usr etc -type f` > DEBIAN/md5sums; \
+	cd ..; \
 	dpkg-deb --build debian hsflowd_$${MYVER}-$${MYREL}_$$MYARCH.deb
 
 xenserver: xenrpm

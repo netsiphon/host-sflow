@@ -14,6 +14,14 @@ extern "C" {
   // inter-bus (inter-thread) messages automatically in EVEventTx
   static __thread EVBus *threadBus;
 
+  EVBus *EVCurrentBus() {
+    return threadBus;
+  }
+
+  void EVCurrentBusSet(EVBus *bus) {
+    threadBus = bus;  // assign to thread-local var
+  }
+
   /*_________________--------------------------------------------------__________________
     _________________  minimal module-loader with event bus mechanism  __________________
     -----------------__________________________________________________------------------
@@ -48,14 +56,17 @@ extern "C" {
 
   EVBus *EVGetBus(EVMod *mod, char *name, bool create) {
     EVBus *bus;
+    bool new_bus = NO;
     SEMLOCK_DO(mod->root->sync) {
       EVBus rlm = { .name = name };
       bus = UTHashGet(mod->root->buses, &rlm);
       if(!bus && create) {
+	new_bus = YES;
 	bus = (EVBus *)my_calloc(sizeof(EVBus));
 	bus->root = mod->root;
 	bus->name = my_strdup(name);
 	UTHashAdd(mod->root->buses, bus);
+	bus->msgs = UTHASH_NEW(EVLogMsg, msg, UTHASH_SKEY);
 	bus->events = UTHASH_NEW(EVEvent, name, UTHASH_SKEY);
 	bus->eventList = UTArrayNew(UTARRAY_DFLT);
 	bus->sockets = UTArrayNew(UTARRAY_PACK);
@@ -76,8 +87,10 @@ extern "C" {
       }
     }
 
-    EVEvent *handshake = EVGetEvent(bus, EVEVENT_HANDSHAKE);
-    EVEventRx(mod, handshake, evt_handshake);
+    if(new_bus) {
+      EVEvent *handshake = EVGetEvent(bus, EVEVENT_HANDSHAKE);
+      EVEventRx(mod, handshake, evt_handshake);
+    }
 
     return bus;
   }
@@ -313,7 +326,7 @@ extern "C" {
 
   int EVEventTx(EVMod *mod, EVEvent *evt, void *data, size_t dataLen) {
     int sent = 0;
-    if(evt->bus == threadBus) {
+    if(evt->bus == EVCurrentBus()) {
       // local event
       EVAction *act;
       if(evt->actionsChanged) {
@@ -428,11 +441,17 @@ extern "C" {
     return (secs * 1000000000) + nanos;
   }
 
+  int EVTimeDiff_mS(struct timespec *t1, struct timespec *t2) {
+    int secs = t2->tv_sec - t1->tv_sec;
+    int nanos = t2->tv_nsec - t1->tv_nsec;
+    return (secs * 1000) + (nanos / 1000000);
+  }
+
   static void *busRun(void *magic) {
     EVBus *bus = (EVBus *)magic;
     EVMod *mod = bus->root->rootModule;
     assert(bus->running == NO);
-    threadBus = bus; // assign to thread-local var
+    EVCurrentBusSet(bus);
     bus->running = YES;
     EVEvent *start = EVGetEvent(bus, EVEVENT_START);
     EVEvent *tick = EVGetEvent(bus, EVEVENT_TICK);
@@ -521,7 +540,7 @@ extern "C" {
     // a single read() call resulted in 0, 1 or >1 lines found,  or hit EOF with a trailing
     // line in the buffer.
     // insist this is only called from the same thread that opened the socket
-    assert(sock->bus == threadBus);
+    assert(sock->bus == EVCurrentBus());
     if(sock->fd <= 0)
       (*lineCB)(mod, sock, EVSOCKETREAD_BADF, magic);
 
@@ -596,9 +615,8 @@ extern "C" {
       while(close(outPipe[1]) == -1 && errno == EINTR);
       while(close(errPipe[1]) == -1 && errno == EINTR);
       // and exec
-      char *env[] = { NULL };
-      if(execve(cmd[0], cmd, env) == -1) {
-	myLog(LOG_ERR, "execve() failed : errno=%d (%s)", errno, strerror(errno));
+      if(execv(cmd[0], cmd) == -1) {
+	myLog(LOG_ERR, "execv() failed : errno=%d (%s)", errno, strerror(errno));
 	exit(EXIT_FAILURE);
       }
     }
@@ -632,10 +650,6 @@ extern "C" {
     }
   }
 
-  EVBus *EVCurrentBus() {
-    return threadBus;
-  }
-
   void EVBusRun(EVBus *bus) {
     busRun(bus);
   }
@@ -657,6 +671,29 @@ extern "C" {
     // sent final/end events as they stop.
     UTHASH_WALK(mod->root->buses, bus) {
       EVBusStop(bus);
+    }
+  }
+
+  void EVLog(uint32_t rl_secs, int syslogType, char *fmt, ...) {
+    EVBus *bus = EVCurrentBus();
+    EVLogMsg search = { .msg = fmt };
+    EVLogMsg *msg = UTHashGet(bus->msgs, &search);
+    if(msg == NULL) {
+      msg = (EVLogMsg *)my_calloc(sizeof(EVLogMsg));
+      msg->msg = my_strdup(fmt);
+      UTHashAdd(bus->msgs, msg);
+    }
+    if((bus->now.tv_sec - msg->logTime) >= rl_secs) {
+      va_list args;
+      va_start(args, fmt);
+      myLogv(syslogType, fmt, args);
+      msg->logTime = bus->now.tv_sec;
+      if(msg->count > 1)
+	myLog(syslogType, "(msg repeated %u times in %u secs)", msg->count, rl_secs);
+      msg->count = 1;
+    }
+    else {
+      msg->count++;
     }
   }
 

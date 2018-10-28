@@ -64,9 +64,12 @@ extern "C" {
   int parseUUID(char *str, char *uuid);
   int printUUID(const u_char *a, u_char *buf, int bufLen);
   uint32_t hashUUID(char *uuid);
+  bool isZeroUUID(char *uuid);
+
   int printSpeed(const uint64_t speed, char *buf, int bufLen);
 
   // logger
+  void myLogv(int syslogType, char *fmt, va_list args);
   void myLog(int syslogType, char *fmt, ...);
   void setDebug(int level);
   int getDebug(void);
@@ -108,6 +111,7 @@ extern "C" {
   int my_strnequal(const char *s1, const char *s2, uint32_t max);
   int my_strequal(const char *s1, const char *s2);
   uint32_t my_strhash(const char *str);
+  uint32_t my_binhash(const char *bytes, const uint32_t len);
 
   // mutual-exclusion semaphores
   static inline int lockOrDie(pthread_mutex_t *sem) {
@@ -245,6 +249,7 @@ extern "C" {
   char *SFLAddress_print(SFLAddress *addr, char *buf, size_t len);
   int SFLAddress_equal(SFLAddress *addr1, SFLAddress *addr2);
   int SFLAddress_isLoopback(SFLAddress *addr);
+  int SFLAddress_isZero(SFLAddress *addr);
   int SFLAddress_isSelfAssigned(SFLAddress *addr);
   int SFLAddress_isLinkLocal(SFLAddress *addr);
   int SFLAddress_isUniqueLocal(SFLAddress *addr);

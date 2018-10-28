@@ -228,11 +228,12 @@ extern "C" {
     } link_modes;
   };
 
-  static bool ethtool_get_GLINKSETTINGS(HSP *sp, struct ifreq *ifr, int fd, SFLAdaptor *adaptor)
+  static bool ethtool_get_GLINKSETTINGS(HSP *sp, struct ifreq *ifr, int fd, SFLAdaptor *adaptor, bool *sysCallOK)
   {
     // Try to get the ethtool info for this interface so we can infer the
     // ifDirection and ifSpeed. Learned from openvswitch (http://www.openvswitch.org).
-    int changed = NO;
+    bool changed = NO;
+    (*sysCallOK) = NO;
     int err;
     struct {
       struct ethtool_link_settings req;
@@ -266,6 +267,9 @@ extern "C" {
 	return NO;
       }
 
+      // indicate to caller that this has worked
+      (*sysCallOK) = YES;
+
       uint32_t direction = ecmd.req.duplex ? 1 : 2;
       if(direction != adaptor->ifDirection) {
 	changed = YES;
@@ -281,21 +285,22 @@ extern "C" {
         if(adaptor->ifSpeed != 0) {
           changed = YES;
         }
-        setAdaptorSpeed(sp, adaptor, 0);
+        setAdaptorSpeed(sp, adaptor, 0, "ETHTOOL_GLINKSETTINGS1");
       }
       else {
         uint64_t ifSpeed_bps = ifSpeed_mb * 1000000;
         if(adaptor->ifSpeed != ifSpeed_bps) {
           changed = YES;
         }
-        setAdaptorSpeed(sp, adaptor, ifSpeed_bps);
+        setAdaptorSpeed(sp, adaptor, ifSpeed_bps, "ETHTOOL_GLINKSETTINGS2");
       }
     }
     return changed;
   }
 
-#else /* ETHTOOL_GLINKSETTINGS */
+#endif /* ETHTOOL_GLINKSETTINGS */
 
+#ifdef ETHTOOL_GSET
 /*________________--------------------------__________________
   ________________  ethtool_get_GSET        __________________
   ----------------__________________________------------------
@@ -325,20 +330,20 @@ extern "C" {
 	if(adaptor->ifSpeed != 0) {
 	  changed = YES;
 	}
-	setAdaptorSpeed(sp, adaptor, 0);
+	setAdaptorSpeed(sp, adaptor, 0, "ETHTOOL_GSET1");
       }
       else {
 	uint64_t ifSpeed_bps = ifSpeed_mb * 1000000;
 	if(adaptor->ifSpeed != ifSpeed_bps) {
 	  changed = YES;
 	}
-	setAdaptorSpeed(sp, adaptor, ifSpeed_bps);
+	setAdaptorSpeed(sp, adaptor, ifSpeed_bps, "ETHTOOL_GSET2");
       }
     }
     return changed;
   }
 
-#endif /* not ETHTOOL_GLINKSETTINGS */
+#endif /* ETHTOOL_GSET */
 
 #if ( HSP_OPTICAL_STATS && ETHTOOL_GMODULEINFO )
 
@@ -378,6 +383,25 @@ extern "C" {
     return NO;
   }
 #endif /* HSP_OPTICAL_STATS && ETHTOOL_GMODULEINFO */
+
+
+/*________________---------------------------__________________
+  ________________      HSPDevTypeName       __________________
+  ----------------___________________________------------------
+*/
+
+  const char *devTypeName(EnumHSPDevType devType) {
+    switch(devType) {
+    case HSPDEV_OTHER: return "OTHER";
+    case HSPDEV_PHYSICAL: return "PHYSICAL";
+    case HSPDEV_VETH: return "VETH";
+    case HSPDEV_VIF: return "VIF";
+    case HSPDEV_OVS: return "OVS";
+    case HSPDEV_BRIDGE: return "BRIDGE";
+    default: break;
+    }
+    return "<out of range>";
+  }
 
 /*________________---------------------------__________________
   ________________  ethtool_get_GDRVINFO     __________________
@@ -509,12 +533,17 @@ extern "C" {
     }
 #endif
 
+    // GLINKSETTINGS should eventually take over from GSET
+    bool glinkSettingsOK = NO;
 #ifdef ETHTOOL_GLINKSETTINGS
     if(nio->ethtool_GLINKSETTINGS) {
-      changed |= ethtool_get_GLINKSETTINGS(sp, ifr, fd, adaptor);
+      changed |= ethtool_get_GLINKSETTINGS(sp, ifr, fd, adaptor, &glinkSettingsOK);
     }
-#else
-    if(nio->ethtool_GSET) {
+#endif
+
+#ifdef ETHTOOL_GSET
+    // But fall back on GSET if the GLINKSETTINGS syscall fails (e.g. Debian 9)
+    if(glinkSettingsOK==NO && nio->ethtool_GSET) {
       changed |= ethtool_get_GSET(sp, ifr, fd, adaptor);
     }
 #endif
@@ -523,6 +552,60 @@ extern "C" {
       ethtool_get_GSTATS(sp, ifr, fd, adaptor);
     }
     return changed;
+  }
+
+
+/*________________---------------------------__________________
+  ________________   detectInterfaceChange   __________________
+  ----------------___________________________------------------
+  Check for any change to the set of interface.  This can be used
+  to trigger a more extensive re-read of the interface state.
+  Currently it won't detect changes such as a new interface
+  being added,  and it won't detect changes in MAC/IP/VLAN.  We
+  could add checks for all those things but the risk is that we
+  end up doing too much work.  By keeping this light we can call
+  it more frequently,  however listening for interface changes via
+  netlink will probably work better for this.
+*/
+
+  bool detectInterfaceChange(HSP *sp)
+  {
+    int fd = socket (PF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+      fprintf (stderr, "error opening socket: %d (%s)\n", errno, strerror(errno));
+      return 0;
+    }
+    SFLAdaptor *changed = NULL;
+    SFLAdaptor *ad;
+    UTHASH_WALK(sp->adaptorsByName, ad) {
+      myDebug(3, "detectInterfaceChange: testing %s", ad->deviceName);
+      struct ifreq ifr;
+      memset(&ifr, 0, sizeof(ifr));
+      strncpy(ifr.ifr_name, ad->deviceName, sizeof(ifr.ifr_name)-1);
+      if(ioctl(fd,SIOCGIFFLAGS, &ifr) < 0) {
+	myDebug(1, "device %s Get SIOCGIFFLAGS failed : %s",
+		ad->deviceName,
+		strerror(errno));
+	changed = ad;
+	break;
+      }
+      int up = (ifr.ifr_flags & IFF_UP) ? YES : NO;
+      int loopback = (ifr.ifr_flags & IFF_LOOPBACK) ? YES : NO;
+      int bond_master = (ifr.ifr_flags & IFF_MASTER) ? YES : NO;
+      int bond_slave = (ifr.ifr_flags & IFF_SLAVE) ? YES : NO;
+      HSPAdaptorNIO *nio = ADAPTOR_NIO(ad);
+      if(nio->up != up
+	 || nio->loopback != loopback
+	 || nio->bond_master != bond_master
+	 || nio->bond_slave != bond_slave) {
+	changed = ad;
+	break;
+      }
+    }
+    close (fd);
+    if(changed)
+      myDebug(1, "detectInterfaceChange: found change in %s", changed->deviceName);
+    return (changed != NULL);
   }
 
 /*________________---------------------------__________________
@@ -570,7 +653,7 @@ extern "C" {
       int devNameLen = my_strlen(devName);
       if(devNameLen == 0 || devNameLen >= IFNAMSIZ) continue;
       // we set the ifr_name field to make our queries
-      strncpy(ifr.ifr_name, devName, sizeof(ifr.ifr_name));
+      strncpy(ifr.ifr_name, devName, sizeof(ifr.ifr_name)-1);
 
       myDebug(3, "reading interface %s", devName);
 
@@ -655,6 +738,13 @@ extern "C" {
 		up ? "came up" : "went down");
       }
       adaptorNIO->up = up;
+
+      // make sure we notice changes
+      if(adaptorNIO->loopback != loopback
+	 || adaptorNIO->bond_master != bond_master
+	 || adaptorNIO->bond_slave != bond_slave)
+	ad_changed++;
+
       adaptorNIO->loopback = loopback;
       adaptorNIO->bond_master = bond_master;
       adaptorNIO->bond_slave = bond_slave;
@@ -699,9 +789,10 @@ extern "C" {
       }
 
       if(addAdaptorToHT) {
+	// it is a new adaptor name or the mac/ifindex changed
 	ad_added++;
 	adaptorAddOrReplace(sp->adaptorsByName, adaptor);
-	// add to "all namespaces" collections too
+	// add to "all namespaces" collections too.
 	if(gotMac) adaptorAddOrReplace(sp->adaptorsByMac, adaptor);
 	if(ifIndex) adaptorAddOrReplace(sp->adaptorsByIndex, adaptor);
       }
@@ -753,9 +844,21 @@ extern "C" {
       my_free(ad);
     UTHashFree(oldLocalIP6);
   }
-  
+
   return sp->adaptorsByName->entries;
 }
+
+/*________________---------------------------__________________
+  ________________   isLocalAddress          __________________
+  ----------------___________________________------------------
+*/
+  bool isLocalAddress(HSP *sp, SFLAddress *addr) {
+    UTHash *localHT = (addr->type == SFLADDRESSTYPE_IP_V6)
+      ? sp->localIP6
+      : sp->localIP;
+    return (UTHashGet(localHT, addr) != NULL);
+  }
+  
 
 #if defined(__cplusplus)
 } /* extern "C" */

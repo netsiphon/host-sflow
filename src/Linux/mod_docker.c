@@ -122,9 +122,10 @@ extern "C" {
 #define HSP_DOCKER_SOCK  "/var/run/docker.sock"
 #define HSP_DOCKER_MAX_CONCURRENT 3
 #define HSP_DOCKER_HTTP " HTTP/1.1\nHost: " HSP_DOCKER_SOCK "\n\n"
-#define HSP_DOCKER_REQ_EVENTS "GET /events?filters={\"type\":[\"container\"]}" HSP_DOCKER_HTTP
-#define HSP_DOCKER_REQ_CONTAINERS "GET /containers/json" HSP_DOCKER_HTTP
-#define HSP_DOCKER_REQ_INSPECT_ID "GET /containers/%s/json" HSP_DOCKER_HTTP
+#define HSP_DOCKER_API "v1.24"
+#define HSP_DOCKER_REQ_EVENTS "GET /" HSP_DOCKER_API "/events?filters={\"type\":[\"container\"]}" HSP_DOCKER_HTTP
+#define HSP_DOCKER_REQ_CONTAINERS "GET /" HSP_DOCKER_API "/containers/json" HSP_DOCKER_HTTP
+#define HSP_DOCKER_REQ_INSPECT_ID "GET /" HSP_DOCKER_API "/containers/%s/json" HSP_DOCKER_HTTP
 #define HSP_CONTENT_LENGTH_REGEX "^Content-Length: ([0-9]+)$"
   
 #define HSP_DOCKER_CMD "/usr/bin/docker"
@@ -397,7 +398,7 @@ extern "C" {
 	  char *p = line;
 	  char *devName = parseNextTok(&p, " \t:", NO, '\0', NO, buf, MAX_PROC_LINE_CHARS);
 	  if(devName && my_strlen(devName) < IFNAMSIZ) {
-	    strncpy(ifr.ifr_name, devName, sizeof(ifr.ifr_name));
+	    strncpy(ifr.ifr_name, devName, sizeof(ifr.ifr_name)-1);
 	    // Get the flags for this interface
 	    if(ioctl(fd,SIOCGIFFLAGS, &ifr) < 0) {
 	      fprintf(stderr, "container device %s Get SIOCGIFFLAGS failed : %s",
@@ -719,6 +720,7 @@ extern "C" {
     SEMLOCK_DO(sp->sync_agent) {
       sfl_poller_writeCountersSample(vm->poller, &cs);
       sp->counterSampleQueued = YES;
+      sp->telemetry[HSP_TELEMETRY_COUNTER_SAMPLES]++;
     }
   }
 
@@ -837,10 +839,8 @@ extern "C" {
     HSP_mod_DOCKER *mdata = (HSP_mod_DOCKER *)mod->data;
     HSP *sp = (HSP *)EVROOTDATA(mod);
 
-    if(sp->kvm.kvm) {
-      // if we make kvm and docker mutually exclusive, this check will be unnecessary
+    if(!hasVNodeRole(mod, HSP_VNODE_PRIORITY_DOCKER))
       return;
-    }
 
     memset(&mdata->vnodeElem, 0, sizeof(mdata->vnodeElem));
     mdata->vnodeElem.tag = SFLCOUNTERS_HOST_VRT_NODE;
@@ -1333,6 +1333,8 @@ extern "C" {
     // ask to retain root privileges
     retainRootRequest(mod, "needed to access docker.sock");
     retainRootRequest(mod, "needed by mod_docker to probe for adaptors in other namespaces");
+
+    requestVNodeRole(mod, HSP_VNODE_PRIORITY_DOCKER);
 
     mdata->contentLengthPattern = UTRegexCompile(HSP_CONTENT_LENGTH_REGEX);
     mdata->vmsByUUID = UTHASH_NEW(HSPVMState_DOCKER, vm.uuid, UTHASH_DFLT);

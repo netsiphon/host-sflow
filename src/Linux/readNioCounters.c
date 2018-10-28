@@ -131,12 +131,21 @@ extern "C" {
 	      // counters if the slave is going to (because it was
 	      // marked as a switchPort):
 	      if(slave_nio->switchPort) {
-		bond_nio->switchPort = YES;
+		if(!bond_nio->switchPort) {
+		  myDebug(1, "updateBondCounters: marking bond %s as switchPort",
+			  bond->deviceName);
+		  bond_nio->switchPort = YES;
+		}
 	      }
-	      // and vice-versa
-	      if(bond_nio->switchPort) {
-		slave_nio->switchPort = YES;
-	      }
+	      // but we no longer allow the inverse to happen.  If a slave is not
+	      // already marked as a switchPort then do not start treating it as one.
+	      // This is not necessarily an error.  A regular server may enable traffic
+	      // monitoring on a bond interface without intending to get separate
+	      // counters for the components too.  Log as a warning when debugging.
+	      if(bond_nio->switchPort && !slave_nio->switchPort)
+		myDebug(1, "updateBondCounters: warning: bond %s slave %s not marked as switchPort",
+			bond->deviceName,
+			currentSlave->deviceName);
 	    }
 	  }
 
@@ -240,6 +249,57 @@ extern "C" {
       if(ADAPTOR_NIO(adaptor)->bond_master)
 	updateBondCounters(sp, adaptor);
     }
+  }
+
+
+  /*_________________---------------------------__________________
+    _________________   synthesizeBondMetaData  __________________
+    -----------------___________________________------------------
+  */
+
+  static void synthesizeBondMetaData(HSP *sp, SFLAdaptor *bond) {
+    uint64_t ifSpeed = 0;
+    bool up = NO;
+    uint32_t ifDirection = 0;
+    SFLAdaptor *search_ad;
+
+    myDebug(1, "synthesizeBondMetaData: BEFORE: bond %s (ifSpeed=%"PRIu64" dirn=%u) marked %s",
+	    bond->deviceName,
+	    bond->ifSpeed,
+	    bond->ifDirection,
+	    up ? "UP" : "DOWN");
+
+    UTHASH_WALK(sp->adaptorsByIndex, search_ad) {
+      if(search_ad != bond) {
+	HSPAdaptorNIO *search_nio = ADAPTOR_NIO(search_ad);
+	if(search_nio && search_nio->lacp.attachedAggID == bond->ifIndex) {
+
+	  myDebug(1, "synthesizeBondMetaData: bond %s component %s (ifSpeed=%"PRIu64" dirn=%u up=%s)",
+		  bond->deviceName,
+		  search_ad->deviceName,
+		  search_ad->ifSpeed,
+		  search_ad->ifDirection,
+		  search_nio->up ? "UP":"DOWN");
+
+	  // sum ifSpeed
+	  ifSpeed += search_ad->ifSpeed;
+	  // bond is up if any slave is up
+	  if(search_nio->up) up = YES;
+	  // capture ifDirection -- assume the same on all components
+	  if(search_ad->ifDirection) ifDirection = search_ad->ifDirection;
+	}
+      }
+    }
+
+    ADAPTOR_NIO(bond)->up = up;
+    bond->ifSpeed = ifSpeed;
+    bond->ifDirection = ifDirection;
+
+    myDebug(1, "synthesizeBondMetaData: AFTER: bond %s (ifSpeed=%"PRIu64" dirn=%u) marked %s",
+	    bond->deviceName,
+	    bond->ifSpeed,
+	    bond->ifDirection,
+	    up ? "UP" : "DOWN");
   }
 
   /*_________________---------------------------__________________
@@ -635,12 +695,23 @@ extern "C" {
     -----------------___________________________------------------
   */
 
-  int accumulateNioCounters(HSP *sp, SFLAdaptor *adaptor, SFLHost_nio_counters *ctrs, HSP_ethtool_counters *et_ctrs)
+  bool accumulateNioCounters(HSP *sp, SFLAdaptor *adaptor, SFLHost_nio_counters *ctrs, HSP_ethtool_counters *et_ctrs)
   {
     HSPAdaptorNIO *nio = ADAPTOR_NIO(adaptor);
+
+    if(nio->bond_master
+       && sp->synthesizeBondCounters) {
+      // If we are synthezizing bond counters from their components, then we
+      // ignore anything that we are offered for bond counters here,  but we
+      // still have to iterate here to make sure that other properties such as
+      // ifSpeed are rolled up correctly.
+      synthesizeBondMetaData(sp, adaptor);
+      return NO;
+    }
+    
     // have to detect discontinuities here, so use a full
     // set of latched counters and accumulators.
-    int accumulate = nio->last_update ? YES : NO;
+    bool accumulate = nio->last_update ? YES : NO;
     nio->last_update = sp->pollBus->now.tv_sec;
     uint64_t maxDeltaBytes = HSP_MAX_NIO_DELTA64;
 
@@ -697,6 +768,22 @@ extern "C" {
 	      delta.bytes_out,
 	      delta.pkts_in,
 	      delta.pkts_out);
+
+	if(debug(2)) {
+	  myDebug(1, "old=[%"PRIu64",%"PRIu64",%u,%u]",
+		  nio->last_nio.bytes_in,
+		  nio->last_nio.bytes_out,
+		  nio->last_nio.pkts_in,
+		  nio->last_nio.pkts_out);
+	  myDebug(1, "new=[%"PRIu64",%"PRIu64",%u,%u]",
+		  ctrs->bytes_in,
+		  ctrs->bytes_out,
+		  ctrs->pkts_in,
+		  ctrs->pkts_out);
+	  myDebug(1, "logging backtrace...");
+	  log_backtrace(0, NULL);
+	}
+
 	accumulate = NO;
       }
       if(et_delta.mcasts_in > HSP_MAX_NIO_DELTA64  ||
@@ -709,20 +796,43 @@ extern "C" {
     }
 
     if(accumulate) {
-#define NIO_ACCUMULATE(field) nio->nio.field += delta.field
-      NIO_ACCUMULATE(bytes_in);
-      NIO_ACCUMULATE(pkts_in);
-      NIO_ACCUMULATE(errs_in);
-      NIO_ACCUMULATE(drops_in);
-      NIO_ACCUMULATE(bytes_out);
-      NIO_ACCUMULATE(pkts_out);
-      NIO_ACCUMULATE(errs_out);
-      NIO_ACCUMULATE(drops_out);
-#define ET_ACCUMULATE(field) nio->et_total.field += et_delta.field
-      ET_ACCUMULATE(mcasts_in);
-      ET_ACCUMULATE(mcasts_out);
-      ET_ACCUMULATE(bcasts_in);
-      ET_ACCUMULATE(bcasts_out);
+#define NIO_ACCUMULATE(tgt, field) (tgt)->nio.field += delta.field
+      NIO_ACCUMULATE(nio, bytes_in);
+      NIO_ACCUMULATE(nio, pkts_in);
+      NIO_ACCUMULATE(nio, errs_in);
+      NIO_ACCUMULATE(nio, drops_in);
+      NIO_ACCUMULATE(nio, bytes_out);
+      NIO_ACCUMULATE(nio, pkts_out);
+      NIO_ACCUMULATE(nio, errs_out);
+      NIO_ACCUMULATE(nio, drops_out);
+#define ET_ACCUMULATE(tgt, field) (tgt)->et_total.field += et_delta.field
+      ET_ACCUMULATE(nio, mcasts_in);
+      ET_ACCUMULATE(nio, mcasts_out);
+      ET_ACCUMULATE(nio, bcasts_in);
+      ET_ACCUMULATE(nio, bcasts_out);
+      
+      if(nio->bond_slave
+	 && sp->synthesizeBondCounters) {
+	// pour these deltas into the bond totals too
+	SFLAdaptor *bond = adaptorByIndex(sp, nio->lacp.attachedAggID);
+	if(bond) {
+	  HSPAdaptorNIO *bond_nio = ADAPTOR_NIO(bond);
+	  bond_nio->last_update = sp->pollBus->now.tv_sec;
+	  NIO_ACCUMULATE(bond_nio, bytes_in);
+	  NIO_ACCUMULATE(bond_nio, pkts_in);
+	  NIO_ACCUMULATE(bond_nio, errs_in);
+	  NIO_ACCUMULATE(bond_nio, drops_in);
+	  NIO_ACCUMULATE(bond_nio, bytes_out);
+	  NIO_ACCUMULATE(bond_nio, pkts_out);
+	  NIO_ACCUMULATE(bond_nio, errs_out);
+	  NIO_ACCUMULATE(bond_nio, drops_out);
+
+	  ET_ACCUMULATE(bond_nio, mcasts_in);
+	  ET_ACCUMULATE(bond_nio, mcasts_out);
+	  ET_ACCUMULATE(bond_nio, bcasts_in);
+	  ET_ACCUMULATE(bond_nio, bcasts_out);
+	}
+      }
     }
 
     // latch - with struct copy
@@ -833,7 +943,7 @@ extern "C" {
 	      et_stats->n_stats = niostate->et_nctrs;
 
 	      // now issue the ioctl
-	      strncpy(ifr.ifr_name, adaptor->deviceName, sizeof(ifr.ifr_name));
+	      strncpy(ifr.ifr_name, adaptor->deviceName, sizeof(ifr.ifr_name)-1);
 	      ifr.ifr_data = (char *)et_stats;
 	      if(ioctl(fd, SIOCETHTOOL, &ifr) >= 0) {
 		if(getDebug() > 2) {
